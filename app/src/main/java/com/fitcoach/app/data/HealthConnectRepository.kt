@@ -2,14 +2,19 @@ package com.fitcoach.app.data
 
 import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.HealthConnectFeatures
 import androidx.health.connect.client.changes.DeletionChange
 import androidx.health.connect.client.changes.UpsertionChange
+import androidx.health.connect.client.feature.ExperimentalFeatureAvailabilityApi
 import androidx.health.connect.client.permission.HealthPermission
+import androidx.health.connect.client.records.BodyTemperatureRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
+import androidx.health.connect.client.records.MenstruationPeriodRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.RestingHeartRateRecord
+import androidx.health.connect.client.records.SkinTemperatureRecord
 import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
@@ -34,15 +39,10 @@ import java.time.ZoneId
 import kotlin.reflect.KClass
 
 /** 封装所有 Health Connect 调用。缓存与同步策略见 [HealthSyncRepository]。 */
-class HealthConnectRepository(private val context: Context) {
+@OptIn(ExperimentalFeatureAvailabilityApi::class)
+class HealthConnectRepository(private val context: Context) : HealthDataSource {
 
     enum class Availability { AVAILABLE, NOT_INSTALLED, UPDATE_REQUIRED }
-
-    sealed interface ChangesResult {
-        data class Ok(val changes: List<Change>, val nextToken: String) : ChangesResult
-        /** 令牌过期（超过 30 天没同步），需要重新完整导入。 */
-        data object Expired : ChangesResult
-    }
 
     /** 需要跟踪变更的记录类型。心率不跟踪：数据量太大，且只用于计算运动平均心率。 */
     private val trackedTypes: Map<KClass<out Record>, RecordKind> = mapOf(
@@ -51,10 +51,10 @@ class HealthConnectRepository(private val context: Context) {
         RestingHeartRateRecord::class to RecordKind.RESTING_HEART_RATE,
         HeartRateVariabilityRmssdRecord::class to RecordKind.HRV,
         SleepSessionRecord::class to RecordKind.SLEEP,
+        BodyTemperatureRecord::class to RecordKind.BODY_TEMPERATURE,
+        SkinTemperatureRecord::class to RecordKind.SKIN_TEMPERATURE,
+        MenstruationPeriodRecord::class to RecordKind.MENSTRUATION,
     )
-
-    val permissions: Set<String> =
-        (trackedTypes.keys + HeartRateRecord::class).map { HealthPermission.getReadPermission(it) }.toSet()
 
     /** 至少要有步数权限才能计算负荷；其余权限缺失时自动降级。 */
     val minimumPermissions: Set<String> = setOf(HealthPermission.getReadPermission(StepsRecord::class))
@@ -69,22 +69,37 @@ class HealthConnectRepository(private val context: Context) {
             else -> Availability.NOT_INSTALLED
         }
 
-    suspend fun grantedPermissions(): Set<String> =
+    private fun featureAvailable(feature: Int): Boolean = runCatching {
+        client.features.getFeatureStatus(feature) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+    }.getOrDefault(false)
+
+    /** 后台读取（每天早上自动同步、推送建议）需要额外的权限，部分旧版 Health Connect 不支持。 */
+    fun backgroundReadSupported(): Boolean =
+        featureAvailable(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND)
+
+    /** 要向用户申请的全部权限（按设备支持的功能动态决定）。 */
+    fun requestablePermissions(): Set<String> = buildSet {
+        trackedTypes.keys
+            .filter { it != SkinTemperatureRecord::class || featureAvailable(HealthConnectFeatures.FEATURE_SKIN_TEMPERATURE) }
+            .forEach { add(HealthPermission.getReadPermission(it)) }
+        add(HealthPermission.getReadPermission(HeartRateRecord::class))
+        if (backgroundReadSupported()) add(HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND)
+    }
+
+    override suspend fun grantedPermissions(): Set<String> =
         client.permissionController.getGrantedPermissions()
 
-    /** 已授权的、需要跟踪变更的权限（用于判断权限是否变化）。 */
-    fun trackedPermissions(granted: Set<String>): Set<String> =
+    override fun trackedPermissions(granted: Set<String>): Set<String> =
         trackedTypes.keys.map { HealthPermission.getReadPermission(it) }.filter { it in granted }.toSet()
 
     private fun Set<String>.has(type: KClass<out Record>) = HealthPermission.getReadPermission(type) in this
 
     // ---------------- 变更记录（增量同步） ----------------
 
-    suspend fun getChangesToken(granted: Set<String>): String =
+    override suspend fun getChangesToken(granted: Set<String>): String =
         client.getChangesToken(ChangesTokenRequest(recordTypes = trackedTypes.keys.filter { granted.has(it) }.toSet()))
 
-    /** 读取自 [token] 以来的所有变更（自动翻页）。 */
-    suspend fun getChanges(token: String): ChangesResult {
+    override suspend fun getChanges(token: String): ChangesResult {
         val result = mutableListOf<Change>()
         var current = token
         while (true) {
@@ -109,6 +124,9 @@ class HealthConnectRepository(private val context: Context) {
             is RestingHeartRateRecord -> setOf(dateOf(record.time))
             is HeartRateVariabilityRmssdRecord -> setOf(dateOf(record.time))
             is SleepSessionRecord -> setOf(dateOf(record.endTime)) // 睡眠归到起床那天
+            is BodyTemperatureRecord -> setOf(dateOf(record.time))
+            is SkinTemperatureRecord -> setOf(dateOf(record.endTime)) // 夜间测量，归到起床那天
+            is MenstruationPeriodRecord -> datesTouched(record.startTime, record.endTime)
             else -> return null
         }
         return Change.Upsert(kind, record.metadata.id, dates)
@@ -124,11 +142,7 @@ class HealthConnectRepository(private val context: Context) {
 
     // ---------------- 按日期区间读取 ----------------
 
-    /**
-     * 读取 [start]..[end]（含）的完整数据。各类数据并行读取。
-     * [reuse] 返回非 null 时直接复用缓存的运动记录（含平均心率），省掉一次心率聚合查询。
-     */
-    suspend fun fetchRange(
+    override suspend fun fetchRange(
         start: LocalDate,
         end: LocalDate,
         granted: Set<String>,
@@ -139,22 +153,24 @@ class HealthConnectRepository(private val context: Context) {
         val range = TimeRangeFilter.between(startInstant, endInstant)
         val inRange = { d: LocalDate -> !d.isBefore(start) && !d.isAfter(end) }
 
+        suspend fun <T : Record> readIfGranted(type: KClass<T>, filter: TimeRangeFilter = range): List<T> =
+            if (granted.has(type)) readAll(type, filter) else emptyList()
+
+        // 各类数据并行读取
         val aggregates = async { fetchAggregates(start, end, granted) }
-
-        val hrv = async {
-            if (!granted.has(HeartRateVariabilityRmssdRecord::class)) emptyList()
-            else readAll(HeartRateVariabilityRmssdRecord::class, range)
+        val hrv = async { readIfGranted(HeartRateVariabilityRmssdRecord::class) }
+        // 睡眠 / 皮肤温度按起床日期归属，前一晚开始的记录在区间之前，所以往前多读 18 小时
+        val overnight = TimeRangeFilter.between(startInstant.minus(Duration.ofHours(18)), endInstant)
+        val sleep = async { readIfGranted(SleepSessionRecord::class, overnight).filter { inRange(dateOf(it.endTime)) } }
+        val skin = async { readIfGranted(SkinTemperatureRecord::class, overnight).filter { inRange(dateOf(it.endTime)) } }
+        val temperature = async { readIfGranted(BodyTemperatureRecord::class) }
+        // 经期可能在区间之前就开始了，往前多读 14 天
+        val periods = async {
+            readIfGranted(
+                MenstruationPeriodRecord::class,
+                TimeRangeFilter.between(startInstant.minus(Duration.ofDays(14)), endInstant),
+            )
         }
-
-        // 睡眠按起床日期归属，前一晚入睡的记录开始时间在区间之前，所以往前多读 18 小时
-        val sleep = async {
-            if (!granted.has(SleepSessionRecord::class)) emptyList()
-            else readAll(
-                SleepSessionRecord::class,
-                TimeRangeFilter.between(startInstant.minus(Duration.ofHours(18)), endInstant),
-            ).filter { inRange(dateOf(it.endTime)) }
-        }
-
         val sessions = async {
             if (!granted.has(ExerciseSessionRecord::class)) emptyList()
             else readSessions(range, granted.has(HeartRateRecord::class), reuse).filter { inRange(it.date) }
@@ -163,6 +179,12 @@ class HealthConnectRepository(private val context: Context) {
         val (steps, restingHr) = aggregates.await()
         val hrvRecords = hrv.await()
         val sleepRecords = sleep.await()
+        val skinRecords = skin.await()
+        val temperatureRecords = temperature.await()
+        val periodRecords = periods.await()
+
+        val sleepByDay = sleepRecords.groupBy { dateOf(it.endTime) }.mapValues { (_, list) -> summarizeSleep(list) }
+        val periodDates = periodRecords.associate { it.metadata.id to datesTouched(it.startTime, it.endTime) }
 
         RangeSnapshot(
             start = start,
@@ -171,18 +193,58 @@ class HealthConnectRepository(private val context: Context) {
             restingHeartRate = restingHr,
             hrv = hrvRecords.groupBy { dateOf(it.time) }
                 .mapValues { (_, list) -> list.map { it.heartRateVariabilityMillis }.average() },
-            sleepMinutes = sleepRecords.groupBy { dateOf(it.endTime) }
-                .mapValues { (_, list) ->
-                    list.sumOf { Duration.between(it.startTime, it.endTime).toMinutes() }.toDouble()
-                },
+            sleepMinutes = sleepByDay.mapValues { it.value.first },
+            sleepEfficiency = sleepByDay.mapNotNull { (d, v) -> v.second?.let { d to it } }.toMap(),
+            // 一天多次测量时取最高值（用于发烧判断）
+            bodyTemperatureC = temperatureRecords.groupBy { dateOf(it.time) }
+                .mapValues { (_, list) -> list.maxOf { it.temperature.inCelsius } },
+            skinTempDeltaC = skinRecords.groupBy { dateOf(it.endTime) }
+                .mapNotNull { (d, list) ->
+                    val deltas = list.flatMap { r -> r.deltas.map { it.delta.inCelsius } }
+                    if (deltas.isEmpty()) null else d to deltas.average()
+                }.toMap(),
+            menstruationDates = periodDates.values.flatten().filter(inRange).toSet(),
             sessions = sessions.await(),
-            recordDates = hrvRecords.associate { it.metadata.id to dateOf(it.time) } +
-                sleepRecords.associate { it.metadata.id to dateOf(it.endTime) },
+            recordDates = hrvRecords.associate { it.metadata.id to setOf(dateOf(it.time)) } +
+                sleepRecords.associate { it.metadata.id to setOf(dateOf(it.endTime)) } +
+                skinRecords.associate { it.metadata.id to setOf(dateOf(it.endTime)) } +
+                temperatureRecords.associate { it.metadata.id to setOf(dateOf(it.time)) } +
+                periodDates,
         )
     }
 
+    /**
+     * 返回 (实际睡着的分钟数, 睡眠效率)。有睡眠分期时只统计浅睡 / 深睡 / REM / 睡着阶段，
+     * 效率 = 睡着时间 / 卧床时间；没有分期时用整段时长，效率为 null。
+     */
+    private fun summarizeSleep(records: List<SleepSessionRecord>): Pair<Double, Double?> {
+        val asleepStages = setOf(
+            SleepSessionRecord.STAGE_TYPE_SLEEPING,
+            SleepSessionRecord.STAGE_TYPE_LIGHT,
+            SleepSessionRecord.STAGE_TYPE_DEEP,
+            SleepSessionRecord.STAGE_TYPE_REM,
+        )
+        var asleep = 0.0
+        var inBedWithStages = 0.0
+        var asleepWithStages = 0.0
+        for (r in records) {
+            val total = Duration.between(r.startTime, r.endTime).toMinutes().toDouble()
+            if (r.stages.isEmpty()) {
+                asleep += total
+            } else {
+                val minutes = r.stages.filter { it.stage in asleepStages }
+                    .sumOf { Duration.between(it.startTime, it.endTime).toMinutes() }.toDouble()
+                asleep += minutes
+                asleepWithStages += minutes
+                inBedWithStages += total
+            }
+        }
+        val efficiency = if (inBedWithStages > 0) (asleepWithStages / inBedWithStages).coerceIn(0.0, 1.0) else null
+        return asleep to efficiency
+    }
+
     /** 步数、静息心率按天聚合（Health Connect 会自动对多个来源去重）。两个查询并行。 */
-    suspend fun fetchAggregates(
+    override suspend fun fetchAggregates(
         start: LocalDate,
         end: LocalDate,
         granted: Set<String>,

@@ -19,9 +19,14 @@ data class CachedDay(
     val restingHeartRate: Double? = null,
     val hrvRmssd: Double? = null,
     val sleepMinutes: Double? = null,
+    val sleepEfficiency: Double? = null,
+    val bodyTemperatureC: Double? = null,
+    val skinTempDeltaC: Double? = null,
+    val menstruation: Boolean = false,
 ) {
     val isEmpty: Boolean
-        get() = steps == null && restingHeartRate == null && hrvRmssd == null && sleepMinutes == null
+        get() = steps == null && restingHeartRate == null && hrvRmssd == null && sleepMinutes == null &&
+            sleepEfficiency == null && bodyTemperatureC == null && skinTempDeltaC == null && !menstruation
 }
 
 data class CachedSession(
@@ -35,7 +40,7 @@ data class CachedSession(
     val lastModifiedEpochMs: Long,
 )
 
-enum class RecordKind { STEPS, EXERCISE, RESTING_HEART_RATE, HRV, SLEEP }
+enum class RecordKind { STEPS, EXERCISE, RESTING_HEART_RATE, HRV, SLEEP, BODY_TEMPERATURE, SKIN_TEMPERATURE, MENSTRUATION }
 
 /** Health Connect 变更记录的精简版。 */
 sealed interface Change {
@@ -60,15 +65,19 @@ data class RangeSnapshot(
     val restingHeartRate: Map<LocalDate, Double> = emptyMap(),
     val hrv: Map<LocalDate, Double> = emptyMap(),
     val sleepMinutes: Map<LocalDate, Double> = emptyMap(),
+    val sleepEfficiency: Map<LocalDate, Double> = emptyMap(),
+    val bodyTemperatureC: Map<LocalDate, Double> = emptyMap(),
+    val skinTempDeltaC: Map<LocalDate, Double> = emptyMap(),
+    val menstruationDates: Set<LocalDate> = emptySet(),
     val sessions: List<CachedSession> = emptyList(),
-    /** HRV / 睡眠记录的 id → 所属日期，之后收到删除通知时用来定位日期。 */
-    val recordDates: Map<String, LocalDate> = emptyMap(),
+    /** 单条记录的 id → 涉及的日期（HRV、睡眠、体温、经期等），之后收到删除通知时用来定位日期。 */
+    val recordDates: Map<String, Set<LocalDate>> = emptyMap(),
 )
 
 class MetricsCache(
     days: Map<LocalDate, CachedDay> = emptyMap(),
     sessions: Map<String, CachedSession> = emptyMap(),
-    recordDates: Map<String, LocalDate> = emptyMap(),
+    recordDates: Map<String, Set<LocalDate>> = emptyMap(),
     /** Health Connect 变更令牌；null 表示还没做过完整导入。 */
     var changesToken: String? = null,
     /** 生成令牌时已授权的权限；权限变了必须重新完整导入。 */
@@ -81,7 +90,7 @@ class MetricsCache(
 
     val days: Map<LocalDate, CachedDay> get() = _days
     val sessions: Map<String, CachedSession> get() = _sessions
-    val recordDates: Map<String, LocalDate> get() = _recordDates
+    val recordDates: Map<String, Set<LocalDate>> get() = _recordDates
 
     val hasCompletedFullSync: Boolean get() = changesToken != null
 
@@ -97,12 +106,33 @@ class MetricsCache(
     fun applySnapshot(s: RangeSnapshot) {
         val range = s.start..s.end
         for (date in dates(s.start, s.end)) {
-            putDay(date, CachedDay(s.steps[date], s.restingHeartRate[date], s.hrv[date], s.sleepMinutes[date]))
+            putDay(
+                date,
+                CachedDay(
+                    steps = s.steps[date],
+                    restingHeartRate = s.restingHeartRate[date],
+                    hrvRmssd = s.hrv[date],
+                    sleepMinutes = s.sleepMinutes[date],
+                    sleepEfficiency = s.sleepEfficiency[date],
+                    bodyTemperatureC = s.bodyTemperatureC[date],
+                    skinTempDeltaC = s.skinTempDeltaC[date],
+                    menstruation = date in s.menstruationDates,
+                ),
+            )
         }
         _sessions.values.removeAll { it.date in range }
         s.sessions.filter { it.date in range }.forEach { _sessions[it.id] = it }
-        _recordDates.values.removeAll { it in range }
-        _recordDates.putAll(s.recordDates.filterValues { it in range })
+        // 跨区间的记录（如经期）：去掉区间内的日期，其余日期保留
+        val iterator = _recordDates.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            val outside = entry.value.filterNot { it in range }.toSet()
+            if (outside.isEmpty()) iterator.remove() else entry.setValue(outside)
+        }
+        for ((id, recordDays) in s.recordDates) {
+            val inside = recordDays.filter { it in range }
+            if (inside.isNotEmpty()) _recordDates[id] = _recordDates[id].orEmpty() + inside
+        }
     }
 
     /** 只替换步数和静息心率（这两项由 Health Connect 按天聚合，不跟踪单条记录）。 */
@@ -127,9 +157,9 @@ class MetricsCache(
             when (change) {
                 is Change.Upsert -> dirty += change.dates.filter { it in window }
                 is Change.Delete -> {
-                    val date = _sessions[change.id]?.date ?: _recordDates[change.id]
-                    if (date != null) {
-                        if (date in window) dirty += date
+                    val recordDays = _sessions[change.id]?.date?.let(::setOf) ?: _recordDates[change.id]
+                    if (recordDays != null) {
+                        dirty += recordDays.filter { it in window }
                     } else {
                         // 可能是步数或静息心率记录被删了，我们不知道它在哪天
                         refreshAll = true
@@ -160,6 +190,10 @@ class MetricsCache(
                 restingHeartRate = day.restingHeartRate,
                 hrvRmssd = day.hrvRmssd,
                 sleepMinutes = day.sleepMinutes,
+                sleepEfficiency = day.sleepEfficiency,
+                bodyTemperatureC = day.bodyTemperatureC,
+                skinTempDeltaC = day.skinTempDeltaC,
+                menstruation = day.menstruation,
             )
         }.toList()
     }
@@ -168,7 +202,12 @@ class MetricsCache(
     fun prune(keepFrom: LocalDate) {
         _days.keys.removeAll { it < keepFrom }
         _sessions.values.removeAll { it.date < keepFrom }
-        _recordDates.values.removeAll { it < keepFrom }
+        val iterator = _recordDates.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            val kept = entry.value.filter { it >= keepFrom }.toSet()
+            if (kept.isEmpty()) iterator.remove() else entry.setValue(kept)
+        }
     }
 
     private fun putDay(date: LocalDate, day: CachedDay) {

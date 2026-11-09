@@ -64,7 +64,7 @@ object SampleData {
             val steps = jitter(7000.0, 0.15) + (session?.durationMinutes ?: 0.0) * 150
 
             var rhr = jitter(55.0, 0.03)
-            var hrv = jitter(62.0, 0.08)
+            var hrv = jitter(62.0, 0.2) // 真实用户每天 HRV 波动大约 10% 以上
             var sleep = jitter(450.0, 0.06)
             if (scenario == Scenario.FATIGUED && daysFromEnd < 3) {
                 rhr += 7.0

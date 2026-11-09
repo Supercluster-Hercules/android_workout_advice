@@ -23,7 +23,7 @@ class MetricsCacheTest {
             steps = dates(d(from), d(to)).associateWith { steps },
             sleepMinutes = dates(d(from), d(to)).associateWith { 450.0 },
             sessions = sessions,
-            recordDates = mapOf("sleep-${d(to)}" to d(to)),
+            recordDates = mapOf("sleep-${d(to)}" to setOf(d(to))),
         )
 
     @Test
@@ -123,6 +123,23 @@ class MetricsCacheTest {
         cache.prune(d(5))
         assertEquals(6, cache.days.size)
         assertEquals(setOf("b"), cache.sessions.keys)
+    }
+
+    @Test
+    fun `multi-day record deletion marks every day it covers`() {
+        val cache = MetricsCache()
+        cache.applySnapshot(
+            snapshot(1, 10).copy(
+                menstruationDates = setOf(d(4), d(5), d(6)),
+                recordDates = mapOf("period" to setOf(d(4), d(5), d(6))),
+            ),
+        )
+        assertTrue(cache.days[d(5)]!!.menstruation)
+        val plan = cache.plan(listOf(Change.Delete("period")), d(1), d(10))
+        assertEquals(setOf(d(4), d(5), d(6)), plan.dirtyDates)
+        // 只刷新第 6 天时，第 4、5 天的记录关联仍然保留
+        cache.applySnapshot(RangeSnapshot(d(6), d(6)))
+        assertEquals(setOf(d(4), d(5)), cache.recordDates["period"])
     }
 
     @Test

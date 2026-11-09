@@ -32,6 +32,10 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        // 单元测试里调用到的 Android 方法返回默认值，而不是抛异常
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -49,4 +53,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("androidx.health.connect:connect-client:1.1.0-alpha11")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

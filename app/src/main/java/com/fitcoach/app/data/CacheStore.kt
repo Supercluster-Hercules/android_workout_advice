@@ -18,11 +18,11 @@ import java.time.LocalDate
  * 数据量很小（几个月也就几十 KB），用 JSON 足够，不需要引入数据库。
  * 使用 AtomicFile 写入：写到一半 app 被杀掉也不会损坏旧文件。
  */
-class CacheStore(context: Context) {
+class CacheStore(context: Context) : CacheStorage {
 
     private val file = AtomicFile(File(context.filesDir, "health_cache.json"))
 
-    suspend fun load(): MetricsCache = withContext(Dispatchers.IO) {
+    override suspend fun load(): MetricsCache = withContext(Dispatchers.IO) {
         try {
             if (!file.baseFile.exists()) return@withContext MetricsCache()
             val json = JSONObject(file.readFully().toString(Charsets.UTF_8))
@@ -35,7 +35,7 @@ class CacheStore(context: Context) {
         }
     }
 
-    suspend fun save(cache: MetricsCache) = withContext(Dispatchers.IO) {
+    override suspend fun save(cache: MetricsCache): Unit = withContext(Dispatchers.IO) {
         val bytes = toJson(cache).toString().toByteArray(Charsets.UTF_8)
         val out = file.startWrite()
         try {
@@ -47,7 +47,7 @@ class CacheStore(context: Context) {
         }
     }
 
-    suspend fun delete() = withContext(Dispatchers.IO) { file.delete() }
+    override suspend fun delete(): Unit = withContext(Dispatchers.IO) { file.delete() }
 
     private fun toJson(c: MetricsCache) = JSONObject().apply {
         put("version", VERSION)
@@ -61,6 +61,10 @@ class CacheStore(context: Context) {
                     d.restingHeartRate?.let { put("rhr", it) }
                     d.hrvRmssd?.let { put("hrv", it) }
                     d.sleepMinutes?.let { put("sleep", it) }
+                    d.sleepEfficiency?.let { put("sleepEff", it) }
+                    d.bodyTemperatureC?.let { put("temp", it) }
+                    d.skinTempDeltaC?.let { put("skinDelta", it) }
+                    if (d.menstruation) put("period", true)
                 })
             }
         })
@@ -77,7 +81,7 @@ class CacheStore(context: Context) {
             }
         })
         put("recordDates", JSONObject().apply {
-            c.recordDates.forEach { (id, date) -> put(id, date.toString()) }
+            c.recordDates.forEach { (id, dates) -> put(id, JSONArray(dates.map { it.toString() })) }
         })
     }
 
@@ -91,6 +95,10 @@ class CacheStore(context: Context) {
                     restingHeartRate = d.doubleOrNull("rhr"),
                     hrvRmssd = d.doubleOrNull("hrv"),
                     sleepMinutes = d.doubleOrNull("sleep"),
+                    sleepEfficiency = d.doubleOrNull("sleepEff"),
+                    bodyTemperatureC = d.doubleOrNull("temp"),
+                    skinTempDeltaC = d.doubleOrNull("skinDelta"),
+                    menstruation = d.optBoolean("period", false),
                 )
             }
         }
@@ -109,9 +117,12 @@ class CacheStore(context: Context) {
                 sessions[session.id] = session
             }
         }
-        val recordDates = mutableMapOf<String, LocalDate>()
+        val recordDates = mutableMapOf<String, Set<LocalDate>>()
         json.getJSONObject("recordDates").let { obj ->
-            obj.keys().forEach { id -> recordDates[id] = LocalDate.parse(obj.getString(id)) }
+            obj.keys().forEach { id ->
+                val arr = obj.getJSONArray(id)
+                recordDates[id] = (0 until arr.length()).map { LocalDate.parse(arr.getString(it)) }.toSet()
+            }
         }
         val permissions = json.getJSONArray("tokenPermissions").let { arr ->
             (0 until arr.length()).map { arr.getString(it) }.toSet()
@@ -130,7 +141,8 @@ class CacheStore(context: Context) {
     private fun JSONObject.doubleOrNull(key: String) = if (has(key)) getDouble(key) else null
 
     private companion object {
-        const val VERSION = 1
+        /** 结构变化时加 1，旧版本缓存会被丢弃并重新导入。 */
+        const val VERSION = 2
         const val TAG = "CacheStore"
     }
 }

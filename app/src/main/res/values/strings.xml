@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">运动建议</string>
+    <string name="widget_description">显示今天的运动建议</string>
 </resources>

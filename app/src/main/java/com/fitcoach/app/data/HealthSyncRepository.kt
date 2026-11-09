@@ -1,7 +1,5 @@
 package com.fitcoach.app.data
 
-import android.os.SystemClock
-import android.util.Log
 import com.fitcoach.engine.DailyMetrics
 import com.fitcoach.engine.cache.MetricsCache
 import com.fitcoach.engine.cache.contiguousRanges
@@ -16,11 +14,14 @@ import java.time.LocalDate
  *    只重新读取受影响的日期，整段替换缓存里这些日期的数据（所以不会重复）；
  * 3. 最近两天总是重新读取一次：手表的数据经常延迟同步。
  *
- * 用 [Mutex] 保证同一时间只有一个同步在跑（连点刷新也不会并发写缓存）。
+ * 用 [Mutex] 保证同一时间只有一个同步在跑（连点刷新、后台任务同时触发也不会并发写缓存）。
+ * 不依赖 Android 类，便于在 JVM 上做单元测试。
  */
 class HealthSyncRepository(
-    private val hc: HealthConnectRepository,
-    private val store: CacheStore,
+    private val source: HealthDataSource,
+    private val store: CacheStorage,
+    private val today: () -> LocalDate = LocalDate::now,
+    private val log: (String) -> Unit = {},
 ) {
     enum class Mode { FULL, INCREMENTAL, UP_TO_DATE }
 
@@ -43,27 +44,26 @@ class HealthSyncRepository(
     }
 
     suspend fun sync(start: LocalDate, end: LocalDate, forceFull: Boolean = false): Result = mutex.withLock {
-        val startedAt = SystemClock.elapsedRealtime()
+        val startedAt = System.nanoTime()
         val c = cache()
-        val today = LocalDate.now()
+        val today = today()
         val windowStart = today.minusDays(SYNC_DAYS)
-        val granted = hc.grantedPermissions()
-        val tracked = hc.trackedPermissions(granted)
+        val granted = source.grantedPermissions()
+        val tracked = source.trackedPermissions(granted)
+        val reuse = { id: String, modified: Long, date: LocalDate -> c.reusableSession(id, modified, date, today) }
 
         var mode = Mode.FULL
-        var changedDays = 0
+        var changedDays: Int
 
         val token = c.changesToken
         val incremental = if (forceFull || token == null || c.tokenPermissions != tracked) null
-        else hc.getChanges(token) as? HealthConnectRepository.ChangesResult.Ok // 过期时为 null
+        else source.getChanges(token) as? ChangesResult.Ok // 过期时为 null
 
         if (incremental == null) {
             // 先拿令牌再读数据：读取期间发生的变更下次还会收到，重复处理也只是整段替换，不会出错
-            val newToken = hc.getChangesToken(granted)
-            val snapshot = hc.fetchRange(windowStart, today, granted) { id, modified, date ->
-                c.reusableSession(id, modified, date, today)
-            }
-            c.clear()
+            val newToken = source.getChangesToken(granted)
+            val snapshot = source.fetchRange(windowStart, today, granted, reuse)
+            // 整段替换同步窗口内的数据；更早的历史（超过 Health Connect 30 天读取限制的部分）保留
             c.applySnapshot(snapshot)
             c.changesToken = newToken
             c.tokenPermissions = tracked
@@ -74,14 +74,12 @@ class HealthSyncRepository(
             changedDays = plan.dirtyDates.size
 
             if (plan.refreshAllAggregates) {
-                val (steps, restingHr) = hc.fetchAggregates(windowStart, today, granted)
+                val (steps, restingHr) = source.fetchAggregates(windowStart, today, granted)
                 c.applyAggregates(windowStart, today, steps, restingHr)
             }
             val dirty = plan.dirtyDates + today.minusDays(1) + today
             for ((from, to) in contiguousRanges(dirty)) {
-                c.applySnapshot(
-                    hc.fetchRange(from, to, granted) { id, modified, date -> c.reusableSession(id, modified, date, today) },
-                )
+                c.applySnapshot(source.fetchRange(from, to, granted, reuse))
             }
             c.changesToken = incremental.nextToken
         }
@@ -90,8 +88,8 @@ class HealthSyncRepository(
         c.lastSyncEpochMs = System.currentTimeMillis()
         store.save(c)
 
-        val duration = SystemClock.elapsedRealtime() - startedAt
-        Log.i(TAG, "sync mode=$mode changedDays=$changedDays took=${duration}ms")
+        val duration = (System.nanoTime() - startedAt) / 1_000_000
+        log("sync mode=$mode changedDays=$changedDays took=${duration}ms")
         Result(c.toDailyMetrics(start, end), mode, changedDays, duration)
     }
 
@@ -104,8 +102,7 @@ class HealthSyncRepository(
     companion object {
         /** 完整导入的天数（Health Connect 默认只允许读取授权前 30 天的数据）。 */
         const val SYNC_DAYS = 30L
-        /** 本地最多保留的天数。缓存会随时间积累超过 30 天的历史，方便以后做长期趋势。 */
+        /** 本地最多保留的天数。缓存会随时间积累超过 30 天的历史，用于 EWMA 和长期趋势。 */
         const val RETENTION_DAYS = 180L
-        private const val TAG = "HealthSync"
     }
 }

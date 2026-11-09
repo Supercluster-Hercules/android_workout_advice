@@ -8,7 +8,7 @@ import kotlin.math.max
  *   TRIMP/分钟 = HRR × 0.64 × e^(1.92 × HRR)，HRR = (运动心率 - 静息心率) / (最大心率 - 静息心率)
  *
  * 缺少心率时的降级方案：
- * - 有运动记录但没有心率：按中等强度 (HRR 0.6) 估算；
+ * - 有运动记录但没有心率：如果用户填了主观疲劳度 (RPE)，按 RPE 换算强度；否则按中等强度 (HRR 0.6) 估算；
  * - 只有步数：超过日常基线的步数折算成步行分钟，按低强度 (HRR 0.35) 估算。
  */
 object TrainingLoad {
@@ -30,8 +30,21 @@ object TrainingLoad {
     fun heartRateReserve(hr: Double, restingHr: Double, maxHr: Double): Double =
         if (maxHr <= restingHr) UNKNOWN_SESSION_HRR else (hr - restingHr) / (maxHr - restingHr)
 
-    fun sessionLoad(session: ExerciseSession, restingHr: Double, maxHr: Double, sex: Sex? = null): Double {
+    /**
+     * RPE (CR-10) 换算成心率储备的近似值：RPE 5 ≈ HRR 0.6（中等），RPE 10 ≈ 0.9。
+     * 主要用于力量训练等心率偏低、按心率会低估负荷的运动。
+     */
+    fun hrrFromRpe(rpe: Int): Double = 0.3 + 0.06 * rpe.coerceIn(0, 10)
+
+    fun sessionLoad(
+        session: ExerciseSession,
+        restingHr: Double,
+        maxHr: Double,
+        sex: Sex? = null,
+        rpe: Int? = null,
+    ): Double {
         val hrr = session.avgHeartRate?.let { heartRateReserve(it, restingHr, maxHr) }
+            ?: rpe?.let(::hrrFromRpe)
             ?: UNKNOWN_SESSION_HRR
         return session.durationMinutes * trimpPerMinute(hrr, sex)
     }
@@ -39,7 +52,7 @@ object TrainingLoad {
     fun dailyLoad(day: DailyMetrics, profile: UserProfile, restingHrBaseline: Double?): Double {
         val restingHr = day.restingHeartRate ?: restingHrBaseline ?: DEFAULT_RESTING_HR
         val maxHr = profile.estimatedMaxHr()
-        val sessionLoad = day.sessions.sumOf { sessionLoad(it, restingHr, maxHr, profile.sex) }
+        val sessionLoad = day.sessions.sumOf { sessionLoad(it, restingHr, maxHr, profile.sex, day.sessionRpe) }
         val sessionMinutes = day.sessions.sumOf { it.durationMinutes }
         // 运动记录期间的步数也计入了总步数，扣掉运动时长避免重复计算
         val walkingMinutes = day.steps?.let {

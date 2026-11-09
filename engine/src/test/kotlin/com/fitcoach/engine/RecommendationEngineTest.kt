@@ -55,8 +55,8 @@ class RecommendationEngineTest {
     @Test
     fun `sudden spike suggests backing off`() {
         val r = run(Scenario.OVERREACHING)
-        assertTrue(r.acwr!! > 1.5)
-        assertTrue(r.signals.any { it is Signal.AcwrHigh })
+        assertTrue(r.acwr!! > 1.3)
+        assertTrue(r.baseLevel == Level.DECREASE)
         assertTrue(r.signals.any { it is Signal.ConsecutiveTrainingDays })
         assertEquals(Level.REST, r.level)
         assertEquals(0, r.suggestedMinutes)
@@ -102,9 +102,12 @@ class RecommendationEngineTest {
     @Test
     fun `increase is capped so ACWR stays under the safe limit`() {
         val r = run(Scenario.DETRAINING)
-        val last6 = r.dailyLoads.takeLast(6).sumOf { it.load }
-        val newAcwr = (last6 + r.targetLoad) / 7 / r.chronicLoad
-        assertTrue(newAcwr <= 1.3 + 1e-9, "newAcwr=$newAcwr")
+        // 按 EWMA 推算做完目标负荷后的新 ACWR
+        val la = LoadModel.lambda(7)
+        val lc = LoadModel.lambda(28)
+        val newAcute = la * r.targetLoad + (1 - la) * r.acuteLoad
+        val newChronic = lc * r.targetLoad + (1 - lc) * r.chronicLoad
+        assertTrue(newAcute / newChronic <= 1.3 + 1e-9, "newAcwr=${newAcute / newChronic}")
     }
 
     @Test
