@@ -188,7 +188,11 @@ class RecommendationEngine(private val config: EngineConfig = EngineConfig()) {
             heartRateRange = hrRange,
             signals = signals,
             recovery = recovery,
-            dailyLoads = windowDates.zip(loads) { d, l -> DailyLoad(d, l) },
+            dailyLoads = windowDates.zip(loads) { d, l ->
+                val aerobic = byDate[d]?.sessions.orEmpty()
+                    .filterNot { StrengthLoad.isStrengthType(it.type) }.sumOf { it.durationMinutes }
+                DailyLoad(d, l, aerobic)
+            },
             typicalTrainingLoad = typicalTrainingLoad,
             profile = profile,
             maxHeartRate = profile.estimatedMaxHr().roundToInt(),

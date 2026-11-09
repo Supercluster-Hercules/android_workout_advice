@@ -70,6 +70,9 @@ class MainActivity : ComponentActivity() {
                             onEditProfile = viewModel::openProfileDialog,
                             onWellness = viewModel::setWellness,
                             onRpe = viewModel::setRpe,
+                            onAddStrength = viewModel::addStrengthSession,
+                            onDeleteStrength = viewModel::deleteStrengthSession,
+                            onSoreness = viewModel::setSoreness,
                             onToggleNotification = { enabled ->
                                 if (enabled && needsNotificationPermission()) {
                                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)

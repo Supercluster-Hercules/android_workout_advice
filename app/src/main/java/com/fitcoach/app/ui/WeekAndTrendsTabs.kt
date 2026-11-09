@@ -21,6 +21,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.fitcoach.engine.DayKind
+import com.fitcoach.engine.Goal
+import com.fitcoach.engine.SessionFocus
 import com.fitcoach.engine.PlannedDay
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
@@ -46,8 +48,20 @@ fun WeekTab(state: UiState.Ready) {
             Texts.weekNote(week.note)?.let {
                 Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
             }
+            if (week.goal == Goal.MAINTAIN) {
+                Text(Texts.whoMinutes(week), style = MaterialTheme.typography.bodyMedium)
+            }
+            week.goal?.let {
+                Text(
+                    "目标：${Texts.goal(it)} —— ${Texts.goalDescription(it)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Text(
-                "本周目标根据你的慢性负荷和急慢性负荷比确定；安排遵循强弱交替、强度日之后不接强度日、每周至少休息一天。",
+                "本周目标根据你的慢性负荷和急慢性负荷比确定；安排遵循强弱交替、强度日之后不接强度日、每周至少休息一天。" +
+                    if (week.goal == Goal.MUSCLE_GAIN) "力量训练按上下肢分化，同一部位至少间隔 48 小时。"
+                    else if (week.goal != null) "两次力量训练至少间隔 48 小时，尽量不放在强度日。"
+                    else "",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -55,13 +69,13 @@ fun WeekTab(state: UiState.Ready) {
     }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(vertical = 8.dp)) {
-            week.days.forEach { DayRow(it, isToday = it.date == state.advice.recommendation.forDate) }
+            week.days.forEach { DayRow(it, isToday = it.date == state.advice.recommendation.forDate, showFocus = week.goal != null) }
         }
     }
 }
 
 @Composable
-private fun DayRow(day: PlannedDay, isToday: Boolean) {
+private fun DayRow(day: PlannedDay, isToday: Boolean, showFocus: Boolean) {
     val background = if (isToday) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
     Row(
         Modifier.fillMaxWidth().background(background).padding(horizontal = 16.dp, vertical = 10.dp),
@@ -77,10 +91,11 @@ private fun DayRow(day: PlannedDay, isToday: Boolean) {
         ) {
             Text(Texts.dayKind(day.kind), color = Color.White, style = MaterialTheme.typography.labelMedium)
         }
+        val focus = if (showFocus && day.focus != SessionFocus.REST) Texts.focus(day.focus) + " · " else ""
         val detail = when {
-            day.isPast -> "实际负荷 ${day.actualLoad!!.roundToInt()}"
+            day.isPast -> (if (day.isStrength) focus else "") + "实际负荷 ${day.actualLoad!!.roundToInt()}"
             day.kind == DayKind.REST -> "休息或散步拉伸"
-            else -> "约 ${day.minutes} 分钟 · 负荷 ${day.targetLoad.roundToInt()}"
+            else -> "${focus}约 ${day.minutes} 分钟 · 负荷 ${day.targetLoad.roundToInt()}"
         }
         Text(
             (if (isToday) "今天 · " else "") + detail,

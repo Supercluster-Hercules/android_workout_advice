@@ -2,15 +2,26 @@ package com.fitcoach.app.ui
 
 import com.fitcoach.app.data.HealthSyncRepository
 import com.fitcoach.engine.Adjustment
+import com.fitcoach.engine.BodyRegion
 import com.fitcoach.engine.Confidence
 import com.fitcoach.engine.DayKind
+import com.fitcoach.engine.Goal
 import com.fitcoach.engine.Level
+import com.fitcoach.engine.Modality
+import com.fitcoach.engine.MuscleGroup
+import com.fitcoach.engine.MuscleReport
+import com.fitcoach.engine.MuscleStatus
+import com.fitcoach.engine.Prescription
 import com.fitcoach.engine.Recommendation
 import com.fitcoach.engine.SampleData
+import com.fitcoach.engine.SessionFocus
 import com.fitcoach.engine.Sex
 import com.fitcoach.engine.Signal
+import com.fitcoach.engine.StrengthLoad
+import com.fitcoach.engine.TrainingFocus
 import com.fitcoach.engine.UserProfile
 import com.fitcoach.engine.WeekNote
+import com.fitcoach.engine.WeekPlan
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -89,6 +100,7 @@ object Texts {
     fun profileSummary(p: UserProfile): String {
         if (p.age == null && p.sex == null && p.maxHeartRate == null) return "未设置年龄和性别"
         return listOfNotNull(
+            p.goal?.let { "目标：${goal(it)}" },
             p.age?.let { "$it 岁" },
             when (p.sex) {
                 Sex.MALE -> "男"
@@ -174,6 +186,159 @@ object Texts {
         SampleData.Scenario.OVERREACHING -> "突然加量"
         SampleData.Scenario.FATIGUED -> "疲劳未恢复"
         SampleData.Scenario.PHONE_ONLY -> "只有手机"
+    }
+
+    // ---------------- 训练目标 ----------------
+
+    fun goal(g: Goal?) = when (g) {
+        Goal.FAT_LOSS -> "减脂"
+        Goal.MUSCLE_GAIN -> "增肌"
+        Goal.MAINTAIN -> "保持健康"
+        null -> "未设置目标"
+    }
+
+    fun goalDescription(g: Goal?) = when (g) {
+        Goal.FAT_LOSS -> "有氧为主（约 80% 低强度）+ 每周 2 次全身力量；加量 = 延长有氧、多走路"
+        Goal.MUSCLE_GAIN -> "力量为主，上下肢分化，每个部位每周 2 次；加量 = 加组数或重量"
+        Goal.MAINTAIN -> "每周 150–300 分钟中等强度有氧 + 2 次全身力量（WHO 建议）"
+        null -> "不选择时只给通用的有氧建议"
+    }
+
+    fun focus(f: SessionFocus) = when (f) {
+        SessionFocus.REST -> "休息"
+        SessionFocus.CARDIO -> "有氧"
+        SessionFocus.STRENGTH_UPPER -> "上肢力量"
+        SessionFocus.STRENGTH_LOWER -> "下肢力量"
+        SessionFocus.STRENGTH_FULL -> "全身力量"
+    }
+
+    private fun region(f: SessionFocus) = when (f) {
+        SessionFocus.STRENGTH_UPPER -> "上肢"
+        SessionFocus.STRENGTH_LOWER -> "下肢"
+        else -> "全身"
+    }
+
+    /** 结合训练目标和肌肉恢复估算的当天安排。等级本身（加量 / 减量…）不受目标影响。 */
+    fun plan(r: Recommendation, p: Prescription, muscles: MuscleReport?): String {
+        if (r.possibleIllness || r.level == Level.REST || p.goal == null) {
+            return listOfNotNull(plan(r), muscleAdvice(muscles, r.level)).joinToString("。")
+        }
+        val hr = r.heartRateRange?.let { "，心率 ${it.low}–${it.high} bpm" } ?: ""
+        val steps = p.stepTarget?.let { "步数目标约 $it 步" }
+        val main = when (p.modality) {
+            Modality.STRENGTH -> {
+                val base = "约 ${p.strengthMinutes} 分钟${region(p.focus)}力量训练"
+                if (p.goal == Goal.MUSCLE_GAIN) {
+                    base + "：每个动作 3–4 组 × 6–12 次，RPE ${p.strengthRpe - 1}–${p.strengthRpe + 1}；" + when {
+                        p.setsDeltaPerExercise > 0 ->
+                            "比上次每个动作加 1 组，或次数做满后加 ${f1(p.weightIncreasePct * 100)}–5% 重量"
+                        p.setsDeltaPerExercise < 0 -> "每个动作少做 1 组、RPE 不超过 7，重量不变"
+                        else -> "组数和重量与上次相同"
+                    }
+                } else {
+                    base + "：大肌群复合动作，每个 2–3 组 × 8–12 次，RPE ${p.strengthRpe - 1}–${p.strengthRpe}" +
+                        (steps?.let { "；$it" } ?: "")
+                }
+            }
+            Modality.AEROBIC -> when (p.goal) {
+                Goal.FAT_LOSS -> when (r.level) {
+                    Level.INCREASE -> "约 ${p.aerobicMinutes} 分钟有氧$hr，约 80% 时间保持轻松（能说话的强度）"
+                    Level.DECREASE -> "约 ${p.aerobicMinutes} 分钟低强度有氧$hr，保留日常步行"
+                    else -> "约 ${p.aerobicMinutes} 分钟轻松有氧$hr"
+                } + (steps?.let { "；$it" } ?: "")
+                Goal.MUSCLE_GAIN -> "约 ${p.aerobicMinutes} 分钟轻松有氧$hr，帮助恢复，不影响增肌"
+                Goal.MAINTAIN -> when (r.level) {
+                    Level.INCREASE -> "约 ${p.aerobicMinutes} 分钟中等强度有氧$hr，比平时多 5–10 分钟"
+                    Level.DECREASE -> "约 ${p.aerobicMinutes} 分钟低强度活动$hr，例如快走、骑车或游泳"
+                    else -> "约 ${p.aerobicMinutes} 分钟中等强度有氧$hr"
+                }
+                null -> plan(r)
+            }
+            Modality.RECOVERY -> plan(r)
+        }
+        val legsTired = p.modality == Modality.AEROBIC && p.muscleFocus == TrainingFocus.UPPER_BODY
+        val cardioHint = if (legsTired) "腿部还在恢复（估算），有氧可以换成游泳或上肢功率车" else null
+        return listOfNotNull(main, cardioHint ?: muscleAdvice(muscles, r.level)).joinToString("。")
+    }
+
+    /** 例如："股四头肌约恢复 60%（估算）：今天练上肢"。都恢复了返回 null。 */
+    fun muscleAdvice(m: MuscleReport?, level: Level? = null): String? {
+        if (m == null || m.unrecovered.isEmpty() || level == Level.REST) return null
+        fun pct(s: MuscleStatus) = "${muscle(s.muscle)}约恢复 ${(s.recovery * 100).roundToInt()}%"
+        val lowestLower = m.unrecovered.firstOrNull { it.muscle.region == BodyRegion.LOWER && it.muscle.major }
+        val lowestUpper = m.unrecovered.firstOrNull { it.muscle.region == BodyRegion.UPPER && it.muscle.major }
+        return when (m.focus) {
+            TrainingFocus.UPPER_BODY -> lowestLower?.let { "${pct(it)}（估算）：今天练上肢，避开腿部" }
+            TrainingFocus.LOWER_BODY -> lowestUpper?.let { "${pct(it)}（估算）：今天练下肢，避开上肢" }
+            TrainingFocus.LIGHT_ONLY -> "上下肢都还没恢复（${pct(m.unrecovered.first())}，估算）：今天只做轻松有氧或拉伸"
+            TrainingFocus.ANY -> "${pct(m.unrecovered.first())}（估算）：今天避开直接练它的动作"
+        }
+    }
+
+    fun muscle(m: MuscleGroup) = when (m) {
+        MuscleGroup.CHEST -> "胸"
+        MuscleGroup.BACK -> "背"
+        MuscleGroup.SHOULDERS -> "肩"
+        MuscleGroup.BICEPS -> "肱二头肌"
+        MuscleGroup.TRICEPS -> "肱三头肌"
+        MuscleGroup.CORE -> "核心"
+        MuscleGroup.GLUTES -> "臀部"
+        MuscleGroup.QUADS -> "股四头肌"
+        MuscleGroup.HAMSTRINGS -> "腘绳肌"
+        MuscleGroup.CALVES -> "小腿"
+    }
+
+    /** 酸痛自评用的部位说明。 */
+    fun muscleHint(m: MuscleGroup): String? = when (m) {
+        MuscleGroup.QUADS -> "大腿前侧"
+        MuscleGroup.HAMSTRINGS -> "大腿后侧"
+        MuscleGroup.BICEPS -> "上臂前侧"
+        MuscleGroup.TRICEPS -> "上臂后侧"
+        MuscleGroup.CORE -> "腹部和下背"
+        else -> null
+    }
+
+    fun exercise(id: String) = when (id) {
+        "squat" -> "深蹲"
+        "deadlift" -> "硬拉"
+        "romanian_deadlift" -> "罗马尼亚硬拉"
+        "leg_press" -> "腿举"
+        "lunge" -> "箭步蹲"
+        "hip_thrust" -> "臀推"
+        "leg_curl" -> "腿弯举"
+        "leg_extension" -> "腿屈伸"
+        "calf_raise" -> "提踵"
+        "bench_press" -> "卧推"
+        "push_up" -> "俯卧撑"
+        "dip" -> "双杠臂屈伸"
+        "overhead_press" -> "推举"
+        "lateral_raise" -> "侧平举"
+        "pull_up" -> "引体向上"
+        "lat_pulldown" -> "高位下拉"
+        "row" -> "划船（杠铃 / 哑铃）"
+        "biceps_curl" -> "弯举"
+        "triceps_extension" -> "三头臂屈伸"
+        "plank" -> "平板支撑"
+        "crunch" -> "卷腹"
+        else -> id
+    }
+
+    fun hardSetsRange(sets: Double): String = when {
+        sets < 0.5 -> "本周没练"
+        sets < StrengthLoad.EFFECTIVE_SETS_LOW -> "偏少"
+        sets <= StrengthLoad.EFFECTIVE_SETS_HIGH -> "有效区间"
+        else -> "偏多"
+    }
+
+    fun whoMinutes(week: WeekPlan): String {
+        val total = week.aerobicMinutesTotal
+        val base = "本周有氧约 $total 分钟（已完成 ${week.aerobicMinutesDone.roundToInt()} + 计划 ${week.aerobicMinutesPlanned}），" +
+            "WHO 建议每周 150–300 分钟中等强度"
+        return when {
+            total < 150 -> "$base。按当前负荷安排还不够，可以靠多走路逐步补上，不要一次加太多"
+            total > 300 -> "$base。已超过建议上限，注意恢复"
+            else -> "$base，已达标"
+        }
     }
 
     fun hours(minutes: Double): String {

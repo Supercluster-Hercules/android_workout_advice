@@ -22,6 +22,7 @@ import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ChangesTokenRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import com.fitcoach.engine.StrengthLoad
 import com.fitcoach.engine.cache.CachedSession
 import com.fitcoach.engine.cache.Change
 import com.fitcoach.engine.cache.RangeSnapshot
@@ -282,7 +283,8 @@ class HealthConnectRepository(private val context: Context) : HealthDataSource {
                     val id = record.metadata.id
                     val modified = record.metadata.lastModifiedTime.toEpochMilli()
                     val date = dateOf(record.startTime)
-                    reuse(id, modified, date) ?: CachedSession(
+                    // 类型名每次都按记录重新生成（旧缓存里可能是"运动类型 N"），供肌肉疲劳估算识别跑步、骑行等
+                    reuse(id, modified, date)?.copy(type = sessionType(record)) ?: CachedSession(
                         id = id,
                         date = date,
                         durationMinutes = Duration.between(record.startTime, record.endTime).toMinutes().toDouble(),
@@ -294,11 +296,35 @@ class HealthConnectRepository(private val context: Context) : HealthDataSource {
                                 ),
                             )[HeartRateRecord.BPM_AVG]?.toDouble()
                         } else null,
-                        type = record.title ?: "运动类型 ${record.exerciseType}",
+                        type = sessionType(record),
                         lastModifiedEpochMs = modified,
                     )
                 }
             }.awaitAll()
+    }
+
+    /**
+     * 常见运动类型用固定的中文名（引擎按关键字把它们映射到肌群），其他类型用记录标题。
+     * 力量训练类统一叫"力量训练"，这样当天有力量记录时可以被替换，避免重复计算负荷。
+     */
+    private fun sessionType(record: ExerciseSessionRecord): String = when (record.exerciseType) {
+        ExerciseSessionRecord.EXERCISE_TYPE_RUNNING,
+        ExerciseSessionRecord.EXERCISE_TYPE_RUNNING_TREADMILL -> "跑步"
+        ExerciseSessionRecord.EXERCISE_TYPE_BIKING,
+        ExerciseSessionRecord.EXERCISE_TYPE_BIKING_STATIONARY -> "骑行"
+        ExerciseSessionRecord.EXERCISE_TYPE_SWIMMING_POOL,
+        ExerciseSessionRecord.EXERCISE_TYPE_SWIMMING_OPEN_WATER -> "游泳"
+        ExerciseSessionRecord.EXERCISE_TYPE_ROWING,
+        ExerciseSessionRecord.EXERCISE_TYPE_ROWING_MACHINE -> "划船"
+        ExerciseSessionRecord.EXERCISE_TYPE_ELLIPTICAL -> "椭圆机"
+        ExerciseSessionRecord.EXERCISE_TYPE_HIKING -> "徒步"
+        ExerciseSessionRecord.EXERCISE_TYPE_STAIR_CLIMBING,
+        ExerciseSessionRecord.EXERCISE_TYPE_STAIR_CLIMBING_MACHINE -> "爬楼"
+        ExerciseSessionRecord.EXERCISE_TYPE_WALKING -> "步行"
+        ExerciseSessionRecord.EXERCISE_TYPE_STRENGTH_TRAINING,
+        ExerciseSessionRecord.EXERCISE_TYPE_WEIGHTLIFTING,
+        ExerciseSessionRecord.EXERCISE_TYPE_CALISTHENICS -> StrengthLoad.SESSION_TYPE
+        else -> record.title ?: "运动类型 ${record.exerciseType}"
     }
 
     private suspend fun <T : Record> readAll(type: KClass<T>, range: TimeRangeFilter): List<T> {

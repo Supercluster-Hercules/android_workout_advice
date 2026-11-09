@@ -21,7 +21,6 @@ import com.fitcoach.app.FitCoachApp
 import com.fitcoach.app.MainActivity
 import com.fitcoach.app.R
 import com.fitcoach.app.ui.Texts
-import com.fitcoach.engine.Recommendation
 import kotlinx.coroutines.CancellationException
 import java.time.Duration
 import java.time.LocalDateTime
@@ -50,8 +49,8 @@ class DailyAdviceWorker(context: Context, params: WorkerParameters) : CoroutineW
         } ?: return Result.success() // 还没导入过数据
 
         val advice = app.computeAdvice(history, forDate, app.profiles.load())
-        app.publishLatest(advice.recommendation)
-        if (app.settings.morningNotification) showNotification(applicationContext, advice.recommendation)
+        app.publishLatest(advice)
+        if (app.settings.morningNotification) showNotification(applicationContext, advice)
         return Result.success()
     }
 
@@ -78,7 +77,9 @@ class DailyAdviceWorker(context: Context, params: WorkerParameters) : CoroutineW
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         }
 
-        private fun showNotification(context: Context, r: Recommendation) {
+        private fun showNotification(context: Context, advice: FitCoachApp.Advice) {
+            val r = advice.recommendation
+            val plan = Texts.plan(r, advice.prescription, advice.muscles)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
                 PackageManager.PERMISSION_GRANTED
@@ -97,8 +98,8 @@ class DailyAdviceWorker(context: Context, params: WorkerParameters) : CoroutineW
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle("${Texts.dayLabel(r.forDate)}建议：${Texts.level(r.level)}")
-                .setContentText(Texts.plan(r))
-                .setStyle(NotificationCompat.BigTextStyle().bigText(Texts.plan(r)))
+                .setContentText(plan)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(plan))
                 .setContentIntent(open)
                 .setAutoCancel(true)
                 .build()

@@ -6,9 +6,12 @@ import androidx.lifecycle.viewModelScope
 import com.fitcoach.app.FitCoachApp
 import com.fitcoach.app.data.HealthConnectRepository.Availability
 import com.fitcoach.app.data.HealthSyncRepository
+import com.fitcoach.app.data.StrengthData
 import com.fitcoach.app.work.DailyAdviceWorker
 import com.fitcoach.engine.DailyMetrics
+import com.fitcoach.engine.MuscleGroup
 import com.fitcoach.engine.SampleData
+import com.fitcoach.engine.StrengthSession
 import com.fitcoach.engine.UserProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -34,6 +37,16 @@ data class FeedbackPrompt(
     val rpe: Int?,
 )
 
+/** 「力量」页需要的数据。 */
+data class StrengthUi(
+    /** 最近的力量训练记录，新的在前。 */
+    val recent: List<StrengthSession>,
+    /** 今天各部位的酸痛自评。 */
+    val todaySoreness: Map<MuscleGroup, Int>,
+    /** 演示模式下只能看，不能记录。 */
+    val readOnly: Boolean,
+)
+
 sealed interface UiState {
     data class Loading(val message: String? = null) : UiState
     data class HealthConnectMissing(val updateRequired: Boolean) : UiState
@@ -44,6 +57,7 @@ sealed interface UiState {
         val demoScenario: SampleData.Scenario?,
         val sync: SyncStatus? = null,
         val feedback: FeedbackPrompt? = null,
+        val strength: StrengthUi = StrengthUi(emptyList(), emptyMap(), readOnly = true),
     ) : UiState
     data class Error(val message: String) : UiState
 }
@@ -111,6 +125,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val date = (state.value as? UiState.Ready)?.feedback?.rpeDate ?: return
         fitApp.feedback.setRpe(date, value)
         recompute()
+    }
+
+    // ---------------- 力量训练记录 / 酸痛自评 ----------------
+
+    fun addStrengthSession(session: StrengthSession) {
+        if (demoScenario != null) return
+        fitApp.strength.addSession(session)
+        recompute()
+    }
+
+    fun deleteStrengthSession(id: String) {
+        if (demoScenario != null) return
+        fitApp.strength.deleteSession(id)
+        recompute()
+    }
+
+    /** [score] 为 null 表示清除今天这个部位的自评。 */
+    fun setSoreness(muscle: MuscleGroup, score: Int?) {
+        if (demoScenario != null) return
+        fitApp.strength.setSoreness(muscle, score)
+        recompute()
+    }
+
+    private fun strengthUi(data: StrengthData, readOnly: Boolean): StrengthUi {
+        val today = LocalDate.now()
+        return StrengthUi(
+            recent = data.sessions.filter { it.date >= today.minusDays(RECENT_DAYS) }.sortedByDescending { it.start },
+            todaySoreness = data.soreness.filter { it.time.toLocalDate() == today }.associate { it.muscle to it.score },
+            readOnly = readOnly,
+        )
     }
 
     private fun feedbackPrompt(forDate: LocalDate): FeedbackPrompt {
@@ -181,8 +225,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun publish(history: List<DailyMetrics>, sync: SyncStatus?) {
         val advice = fitApp.computeAdvice(history, forDate, _profile.value)
-        fitApp.publishLatest(advice.recommendation)
-        _state.value = UiState.Ready(advice, demoScenario = null, sync = sync, feedback = feedbackPrompt(forDate))
+        fitApp.publishLatest(advice)
+        _state.value = UiState.Ready(
+            advice,
+            demoScenario = null,
+            sync = sync,
+            feedback = feedbackPrompt(forDate),
+            strength = strengthUi(fitApp.strength.load(), readOnly = false),
+        )
     }
 
     /** 资料或自评变化后只需重新计算，不必重新同步。 */
@@ -198,7 +248,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         demoScenario = scenario
         val today = LocalDate.now()
         val demoHistory = SampleData.generate(scenario, endDate = today, days = FitCoachApp.HISTORY_DAYS.toInt())
-        val advice = fitApp.computeAdvice(demoHistory, today.plusDays(1), _profile.value, includeFeedback = false)
-        _state.value = UiState.Ready(advice, scenario)
+        val demoStrength = StrengthData(SampleData.strengthSessions(today, days = 28))
+        val advice = fitApp.computeAdvice(
+            demoHistory, today.plusDays(1), _profile.value, includeFeedback = false, strengthData = demoStrength,
+        )
+        _state.value = UiState.Ready(advice, scenario, strength = strengthUi(demoStrength, readOnly = true))
+    }
+
+    private companion object {
+        const val RECENT_DAYS = 30L
     }
 }

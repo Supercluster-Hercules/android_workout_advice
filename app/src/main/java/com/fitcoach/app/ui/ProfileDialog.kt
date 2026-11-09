@@ -2,9 +2,13 @@ package com.fitcoach.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -19,12 +23,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.fitcoach.engine.Goal
 import com.fitcoach.engine.Sex
 import com.fitcoach.engine.UserProfile
 
 private val AGE_RANGE = 10..100
 private val MAX_HR_RANGE = 100..230
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ProfileDialog(
     initial: UserProfile,
@@ -34,6 +40,7 @@ fun ProfileDialog(
     var ageText by remember { mutableStateOf(initial.age?.toString() ?: "") }
     var sex by remember { mutableStateOf(initial.sex) }
     var maxHrText by remember { mutableStateOf(initial.maxHeartRate?.toString() ?: "") }
+    var goal by remember { mutableStateOf(initial.goal) }
 
     val age = ageText.toIntOrNull()
     val ageValid = age != null && age in AGE_RANGE
@@ -44,7 +51,7 @@ fun ProfileDialog(
         onDismissRequest = onDismiss,
         title = { Text("个人资料") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     "年龄和性别会用来估算最大心率、计算训练负荷，并调整加量幅度和恢复要求。资料只保存在本机。",
                     style = MaterialTheme.typography.bodySmall,
@@ -68,6 +75,21 @@ fun ProfileDialog(
                     FilterChip(selected = sex == Sex.FEMALE, onClick = { sex = Sex.FEMALE }, label = { Text("女") })
                     FilterChip(selected = sex == null, onClick = { sex = null }, label = { Text("不填写") })
                 }
+                Text("训练目标", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(Goal.FAT_LOSS, Goal.MUSCLE_GAIN, Goal.MAINTAIN, null).forEach { g ->
+                        FilterChip(
+                            selected = goal == g,
+                            onClick = { goal = g },
+                            label = { Text(if (g == null) "暂不选择" else Texts.goal(g)) },
+                        )
+                    }
+                }
+                Text(
+                    Texts.goalDescription(goal) + "。目标只改变训练内容，不会放宽安全判断（负荷比、恢复状况）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 OutlinedTextField(
                     value = maxHrText,
                     onValueChange = { maxHrText = it.filter(Char::isDigit).take(3) },
@@ -89,7 +111,7 @@ fun ProfileDialog(
         confirmButton = {
             TextButton(
                 enabled = ageValid && maxHrValid,
-                onClick = { onSave(UserProfile(age = age, sex = sex, maxHeartRate = maxHr)) },
+                onClick = { onSave(UserProfile(age = age, sex = sex, maxHeartRate = maxHr, goal = goal)) },
             ) { Text("保存") }
         },
         dismissButton = {

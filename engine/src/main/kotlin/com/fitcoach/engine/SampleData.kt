@@ -90,4 +90,27 @@ object SampleData {
             }
         }
     }
+
+    /**
+     * 演示用的力量训练记录：每周二练上肢、周四练下肢（截至 [endDate] 的 [days] 天）。
+     * 不会混进 [generate] 的数据里，以免影响现有场景的测试。
+     */
+    fun strengthSessions(endDate: LocalDate, days: Int = 35): List<StrengthSession> =
+        (days - 1 downTo 0).mapNotNull { offset ->
+            val date = endDate.minusDays(offset.toLong())
+            val exercises = when (date.dayOfWeek) {
+                DayOfWeek.TUESDAY -> listOf(
+                    ExerciseEntry("bench_press", 4, 8, 60.0),
+                    ExerciseEntry("row", 4, 10, 50.0),
+                    ExerciseEntry("overhead_press", 3, 8, 35.0),
+                )
+                DayOfWeek.THURSDAY -> listOf(
+                    ExerciseEntry("squat", 4, 6, 80.0),
+                    ExerciseEntry("romanian_deadlift", 3, 8, 70.0),
+                    ExerciseEntry("calf_raise", 3, 12, 40.0),
+                )
+                else -> return@mapNotNull null
+            }
+            StrengthSession("demo-$date", date.atTime(19, 0), 55.0, 7, exercises)
+        }
 }

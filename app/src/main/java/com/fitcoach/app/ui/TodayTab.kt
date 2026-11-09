@@ -8,10 +8,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -22,6 +24,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.fitcoach.engine.Level
+import com.fitcoach.engine.MuscleReport
 import com.fitcoach.engine.Severity
 import kotlin.math.roundToInt
 
@@ -44,7 +47,13 @@ fun TodayTab(state: UiState.Ready, actions: MainActions) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("${Texts.dayLabel(r.forDate)}建议", style = MaterialTheme.typography.labelLarge)
             Text(Texts.level(r.level), style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
-            Text(Texts.plan(r), style = MaterialTheme.typography.bodyLarge)
+            Text(
+                Texts.plan(r, state.advice.prescription, state.advice.muscles),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            r.profile.goal?.let {
+                Text("目标：${Texts.goal(it)}（只影响训练内容，不影响加减量判断）", style = MaterialTheme.typography.bodySmall)
+            }
             Text(Texts.confidence(r.confidence), style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -75,6 +84,8 @@ fun TodayTab(state: UiState.Ready, actions: MainActions) {
             }
         }
     }
+
+    MuscleCard(state.advice.muscles)
 
     // 恢复指标
     val rec = r.recovery
@@ -202,6 +213,56 @@ private fun FeedbackCard(prompt: FeedbackPrompt, actions: MainActions) {
             }
             Text(
                 "0 = 没练，5 = 累，10 = 到极限（Foster CR-10 量表）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MuscleCard(m: MuscleReport) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("肌肉恢复（估算）", style = MaterialTheme.typography.titleMedium)
+            if (!m.hasData && m.statuses.none { it.sorenessScore != null }) {
+                Text(
+                    "最近 7 天没有能分配到肌群的训练。在「力量」页记录力量训练，跑步、骑行、游泳等会自动从 Health Connect 读取。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                Texts.muscleAdvice(m)?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                }
+                m.statuses.sortedBy { it.recovery }.forEach { s ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(Texts.muscle(s.muscle), Modifier.width(72.dp), style = MaterialTheme.typography.bodyMedium)
+                        LinearProgressIndicator(
+                            progress = { s.recovery.toFloat() },
+                            modifier = Modifier.weight(1f),
+                            color = if (s.recovered) Color(0xFF43A047) else Color(0xFFEF6C00),
+                        )
+                        Text(
+                            "约 ${(s.recovery * 100).roundToInt()}%" +
+                                (if (s.hoursToRecovered > 0) " · ${s.hoursToRecovered}h" else "") +
+                                (s.sorenessScore?.let { " · 酸痛 $it" } ?: ""),
+                            Modifier.width(120.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+            if (m.unloggedStrengthDays > 0) {
+                Text(
+                    "最近 7 天有 ${m.unloggedStrengthDays} 天的力量训练只有 Health Connect 记录、没有动作明细，无法估算是哪些肌群，可以在「力量」页补录。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
+            Text(
+                "这是根据训练记录和酸痛自评推算的估计值，不是测量值（目前没有经过验证的设备指标能测出单个肌群的疲劳）。" +
+                    "小时数是预计恢复到 90% 还需要的时间。" +
+                    if (m.calibrated) "已根据你的酸痛自评调整了个人恢复速度。" else "填写酸痛自评可以让估算更贴近你的感受。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

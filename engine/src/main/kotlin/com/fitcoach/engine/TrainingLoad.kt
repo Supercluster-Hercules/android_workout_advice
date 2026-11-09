@@ -8,6 +8,7 @@ import kotlin.math.max
  *   TRIMP/分钟 = HRR × 0.64 × e^(1.92 × HRR)，HRR = (运动心率 - 静息心率) / (最大心率 - 静息心率)
  *
  * 缺少心率时的降级方案：
+ * - 单次运动自带 RPE（力量训练记录）：优先按 RPE 换算强度，即 Foster 的 session-RPE 法；
  * - 有运动记录但没有心率：如果用户填了主观疲劳度 (RPE)，按 RPE 换算强度；否则按中等强度 (HRR 0.6) 估算；
  * - 只有步数：超过日常基线的步数折算成步行分钟，按低强度 (HRR 0.35) 估算。
  */
@@ -43,7 +44,8 @@ object TrainingLoad {
         sex: Sex? = null,
         rpe: Int? = null,
     ): Double {
-        val hrr = session.avgHeartRate?.let { heartRateReserve(it, restingHr, maxHr) }
+        val hrr = session.rpe?.let(::hrrFromRpe)
+            ?: session.avgHeartRate?.let { heartRateReserve(it, restingHr, maxHr) }
             ?: rpe?.let(::hrrFromRpe)
             ?: UNKNOWN_SESSION_HRR
         return session.durationMinutes * trimpPerMinute(hrr, sex)

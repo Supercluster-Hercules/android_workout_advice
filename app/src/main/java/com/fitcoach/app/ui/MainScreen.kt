@@ -31,7 +31,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.fitcoach.engine.MuscleGroup
 import com.fitcoach.engine.SampleData
+import com.fitcoach.engine.StrengthSession
 import com.fitcoach.engine.UserProfile
 
 data class MainActions(
@@ -44,9 +46,12 @@ data class MainActions(
     val onWellness: (Int) -> Unit,
     val onRpe: (Int) -> Unit,
     val onToggleNotification: (Boolean) -> Unit,
+    val onAddStrength: (StrengthSession) -> Unit,
+    val onDeleteStrength: (String) -> Unit,
+    val onSoreness: (MuscleGroup, Int?) -> Unit,
 )
 
-private val tabs = listOf("今日", "本周", "趋势")
+private val tabs = listOf("今日", "本周", "力量", "趋势")
 
 @Composable
 fun MainScreen(
@@ -115,6 +120,7 @@ fun MainScreen(
                 when (selectedTab) {
                     0 -> TodayTab(state, actions)
                     1 -> WeekTab(state)
+                    2 -> StrengthTab(state, actions)
                     else -> TrendsTab(state)
                 }
             }

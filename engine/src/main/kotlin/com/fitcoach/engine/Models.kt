@@ -8,6 +8,11 @@ data class ExerciseSession(
     /** 本次运动的平均心率；手机端没有心率时为 null。 */
     val avgHeartRate: Double? = null,
     val type: String? = null,
+    /**
+     * 这一次训练的主观疲劳度（CR-10）。力量训练记录会填写；有它时优先于心率，
+     * 因为心率会低估力量训练的负荷。
+     */
+    val rpe: Int? = null,
 )
 
 /**
@@ -44,12 +49,17 @@ data class DailyMetrics(
 
 enum class Sex { MALE, FEMALE }
 
+/** 训练目标。只影响训练内容（方式、强度分布、周计划），不影响安全判断。 */
+enum class Goal { FAT_LOSS, MUSCLE_GAIN, MAINTAIN }
+
 data class UserProfile(
     val age: Int? = null,
     /** null 表示用户未填写，按通用公式计算。 */
     val sex: Sex? = null,
     /** 实测最大心率（可选），优先于公式估算。 */
     val maxHeartRate: Int? = null,
+    /** null 表示还没选择目标，沿用通用的有氧建议。 */
+    val goal: Goal? = null,
 ) {
     /**
      * 最大心率：实测值优先；否则女性用 Gulati 公式 (206 - 0.88 × 年龄)，
@@ -161,7 +171,12 @@ data class RecoveryStatus(
     val wellness: Int? = null,
 )
 
-data class DailyLoad(val date: LocalDate, val load: Double)
+data class DailyLoad(
+    val date: LocalDate,
+    val load: Double,
+    /** 当天有氧类运动的总分钟数（不含力量训练），用于对照 WHO 每周 150–300 分钟的建议。 */
+    val aerobicMinutes: Double = 0.0,
+)
 
 data class Recommendation(
     val forDate: LocalDate,
